@@ -138,13 +138,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn title_truncates_first_user_message() {
+    fn title_from_first_user_message() {
         let msgs = vec![Message {
             role: "user".into(),
             content: "a".repeat(80),
             thinking: String::new(),
         }];
-        assert_eq!(title_from_messages(&msgs).len(), 60);
+        assert_eq!(title_from_messages(&msgs), "a".repeat(60));
+
+        let no_user = vec![Message {
+            role: "assistant".into(),
+            content: "hi".into(),
+            thinking: String::new(),
+        }];
+        assert_eq!(title_from_messages(&no_user), "New chat");
     }
 
     #[test]

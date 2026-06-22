@@ -518,12 +518,51 @@ mod tests {
     }
 
     #[test]
-    fn resumed_session_starts_at_top_without_auto_pin() {
+    fn load_session_starts_at_top_without_auto_pin() {
+        let _guard = crate::store::TEST_DIR_LOCK.lock().unwrap();
+        let tmp = std::env::temp_dir().join(format!("aitui-test-{}", new_session_id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("AITUI_TEST_SESSIONS_DIR", &tmp);
+
+        let mut content = String::new();
+        for i in 0..40 {
+            content.push_str(&format!("saved-line-{i:02}\n"));
+        }
+        store::save(&Session {
+            id: "saved-long".into(),
+            title: "saved".into(),
+            created_at: 1,
+            updated_at: 1,
+            messages: vec![
+                Message {
+                    role: "user".into(),
+                    content: "hello".into(),
+                    thinking: String::new(),
+                },
+                Message {
+                    role: "assistant".into(),
+                    content,
+                    thinking: String::new(),
+                },
+            ],
+        })
+        .unwrap();
+
         let mut app = app_with_long_chat();
-        app.auto_scroll = false;
-        app.scroll = 0;
+        app.auto_scroll = true;
         app.sync_scroll(app.viewport_height);
+        assert!(app.scroll > 0);
+
+        app.load_session("saved-long");
+
+        assert!(!app.auto_scroll);
         assert_eq!(app.scroll, 0);
+        assert_eq!(app.session_id, "saved-long");
+        assert_eq!(app.messages.len(), 2);
+        assert!(app.messages[1].content.contains("saved-line-39"));
+
+        std::env::remove_var("AITUI_TEST_SESSIONS_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     fn type_chars(app: &mut App, chars: &[char]) {

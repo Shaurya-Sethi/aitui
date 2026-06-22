@@ -96,6 +96,41 @@ fn normalize_url(url: &str) -> String {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_url_appends_v1_once() {
+        assert_eq!(
+            normalize_url("http://localhost:11434"),
+            "http://localhost:11434/v1"
+        );
+        assert_eq!(
+            normalize_url("http://localhost:11434/"),
+            "http://localhost:11434/v1"
+        );
+        assert_eq!(
+            normalize_url("http://localhost:11434/v1"),
+            "http://localhost:11434/v1"
+        );
+        assert_eq!(
+            normalize_url("http://localhost:11434/v1/"),
+            "http://localhost:11434/v1"
+        );
+    }
+
+    #[test]
+    fn endpoint_host_includes_port() {
+        let cfg = Config {
+            base_url: "http://localhost:11434/v1".into(),
+            model: "m".into(),
+            api_key: None,
+        };
+        assert_eq!(cfg.endpoint_host(), "localhost:11434");
+    }
+}
+
 mod url {
     pub fn host_str(url: &str) -> Option<&str> {
         let rest = url

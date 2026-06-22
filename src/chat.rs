@@ -244,4 +244,10 @@ mod tests {
         assert!(matches!(&events[0], ChatEvent::ThinkingToken(t) if t == "hmm"));
         assert!(matches!(&events[1], ChatEvent::Token(t) if t == "hi"));
     }
+
+    #[test]
+    fn parse_ignores_malformed_json() {
+        let events = collect_events("data: not-json");
+        assert!(events.is_empty());
+    }
 }
