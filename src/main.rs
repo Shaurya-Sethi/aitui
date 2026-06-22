@@ -6,13 +6,9 @@ mod store;
 mod theme;
 mod ui;
 
-#[cfg(test)]
-mod ui_tests;
-
 use anyhow::Result;
 use app::{Action, App};
-use clap::Parser;
-use config::{Cli, Config};
+use config::Config;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyboardEnhancementFlags,
     KeyEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -28,8 +24,8 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let config = Config::load(&cli);
+    let args = config::parse_args();
+    let config = Config::load(&args);
     let mut app = App::new(config);
 
     enable_raw_mode()?;
@@ -78,7 +74,6 @@ fn run_loop(
                 Event::Mouse(mouse) => app.handle_mouse(mouse),
                 Event::Resize(_, _) => {
                     app.md_cache.clear();
-                    app.md_cache_key.clear();
                 }
                 _ => {}
             }

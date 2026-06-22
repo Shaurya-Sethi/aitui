@@ -1,20 +1,49 @@
-use clap::Parser;
+use std::env;
+use std::process;
 
-#[derive(Parser, Debug)]
-#[command(
-    name = "aitui",
-    about = "Lightweight terminal chat UI",
-    after_help = "Environment variables (used when flags are omitted):\n  AITUI_BASE_URL   OpenAI-compatible base URL\n  AITUI_MODEL      Model name\n  AITUI_API_KEY    API key"
-)]
-pub struct Cli {
-    #[arg(long, help = "OpenAI-compatible base URL")]
+#[derive(Debug, Default)]
+pub struct CliArgs {
     pub url: Option<String>,
-
-    #[arg(long, help = "Model name")]
     pub model: Option<String>,
-
-    #[arg(long, help = "API key")]
     pub api_key: Option<String>,
+}
+
+const HELP: &str = "\
+Lightweight terminal chat UI
+
+Usage: aitui [OPTIONS]
+
+Options:
+      --url <URL>          OpenAI-compatible base URL
+      --model <MODEL>      Model name
+      --api-key <KEY>      API key
+  -h, --help               Print help
+
+Environment variables (used when flags are omitted):
+  AITUI_BASE_URL   OpenAI-compatible base URL
+  AITUI_MODEL      Model name
+  AITUI_API_KEY    API key
+";
+
+pub fn parse_args() -> CliArgs {
+    let mut args = env::args().skip(1);
+    let mut out = CliArgs::default();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" => {
+                print!("{HELP}");
+                process::exit(0);
+            }
+            "--url" => out.url = args.next(),
+            "--model" => out.model = args.next(),
+            "--api-key" => out.api_key = args.next(),
+            other => {
+                eprintln!("unknown argument: {other}\n\n{HELP}");
+                process::exit(1);
+            }
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone)]
@@ -25,13 +54,13 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn load(cli: &Cli) -> Self {
-        let base_url = env_or(cli.url.clone(), "AITUI_BASE_URL")
+    pub fn load(args: &CliArgs) -> Self {
+        let base_url = env_or(args.url.clone(), "AITUI_BASE_URL")
             .unwrap_or_else(|| "http://localhost:11434/v1".into());
 
-        let model = env_or(cli.model.clone(), "AITUI_MODEL").unwrap_or_else(|| "llama3".into());
+        let model = env_or(args.model.clone(), "AITUI_MODEL").unwrap_or_else(|| "llama3".into());
 
-        let api_key = env_or(cli.api_key.clone(), "AITUI_API_KEY");
+        let api_key = env_or(args.api_key.clone(), "AITUI_API_KEY");
 
         Self {
             base_url: normalize_url(&base_url),
@@ -54,7 +83,7 @@ impl Config {
 }
 
 fn env_or(cli: Option<String>, key: &str) -> Option<String> {
-    cli.or_else(|| std::env::var(key).ok())
+    cli.or_else(|| env::var(key).ok())
 }
 
 fn normalize_url(url: &str) -> String {
@@ -68,14 +97,16 @@ fn normalize_url(url: &str) -> String {
 
 mod url {
     pub fn host_str(url: &str) -> Option<&str> {
-        let rest = url.strip_prefix("http://")
+        let rest = url
+            .strip_prefix("http://")
             .or_else(|| url.strip_prefix("https://"))?;
         let host = rest.split('/').next()?;
         Some(host.split(':').next()?)
     }
 
     pub fn port_str(url: &str) -> Option<&str> {
-        let rest = url.strip_prefix("http://")
+        let rest = url
+            .strip_prefix("http://")
             .or_else(|| url.strip_prefix("https://"))?;
         let host = rest.split('/').next()?;
         host.split(':').nth(1)

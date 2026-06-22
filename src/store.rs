@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -31,65 +30,9 @@ pub struct SessionMeta {
 
 pub fn list() -> Result<Vec<SessionMeta>> {
     let dir = sessions_dir()?;
-    let index_path = dir.join("index.json");
-    if !index_path.exists() {
+    if !dir.exists() {
         return Ok(Vec::new());
     }
-    let raw = fs::read_to_string(&index_path)?;
-    match serde_json::from_str::<Vec<SessionMeta>>(&raw) {
-        Ok(mut metas) => {
-            metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-            Ok(metas)
-        }
-        Err(_) => {
-            let metas = rebuild_index_from_disk()?;
-            let _ = write_index(&dir, &metas);
-            Ok(metas)
-        }
-    }
-}
-
-pub fn load(id: &str) -> Result<Session> {
-    let path = sessions_dir()?.join(format!("{id}.json"));
-    let raw = fs::read_to_string(&path)
-        .with_context(|| format!("load session {}", path.display()))?;
-    serde_json::from_str(&raw).context("parse session")
-}
-
-pub fn save(session: &Session) -> Result<()> {
-    let dir = sessions_dir()?;
-    fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{}.json", session.id));
-    fs::write(&path, serde_json::to_string_pretty(session)?)?;
-
-    let mut metas = list()?;
-    metas.retain(|m| m.id != session.id);
-    metas.push(SessionMeta {
-        id: session.id.clone(),
-        title: session.title.clone(),
-        updated_at: session.updated_at,
-    });
-    metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    write_index(&dir, &metas)?;
-    Ok(())
-}
-
-pub fn delete(id: &str) -> Result<()> {
-    let dir = sessions_dir()?;
-    let path = dir.join(format!("{id}.json"));
-    if path.exists() {
-        fs::remove_file(&path)?;
-    }
-    let mut metas = list()?;
-    metas.retain(|m| m.id != id);
-    if dir.exists() {
-        write_index(&dir, &metas)?;
-    }
-    Ok(())
-}
-
-fn rebuild_index_from_disk() -> Result<Vec<SessionMeta>> {
-    let dir = sessions_dir()?;
     let mut metas = Vec::new();
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
@@ -115,11 +58,27 @@ fn rebuild_index_from_disk() -> Result<Vec<SessionMeta>> {
     Ok(metas)
 }
 
-fn write_index(dir: &std::path::Path, metas: &[SessionMeta]) -> Result<()> {
-    let index_path = dir.join("index.json");
-    let tmp_path = dir.join("index.json.tmp");
-    fs::write(&tmp_path, serde_json::to_string_pretty(metas)?)?;
-    fs::rename(tmp_path, index_path)?;
+pub fn load(id: &str) -> Result<Session> {
+    let path = sessions_dir()?.join(format!("{id}.json"));
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("load session {}", path.display()))?;
+    serde_json::from_str(&raw).context("parse session")
+}
+
+pub fn save(session: &Session) -> Result<()> {
+    let dir = sessions_dir()?;
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{}.json", session.id));
+    fs::write(&path, serde_json::to_string_pretty(session)?)?;
+    Ok(())
+}
+
+pub fn delete(id: &str) -> Result<()> {
+    let dir = sessions_dir()?;
+    let path = dir.join(format!("{id}.json"));
+    if path.exists() {
+        fs::remove_file(&path)?;
+    }
     Ok(())
 }
 
@@ -152,8 +111,12 @@ fn sessions_dir() -> Result<PathBuf> {
     if let Ok(dir) = std::env::var("AITUI_TEST_SESSIONS_DIR") {
         return Ok(PathBuf::from(dir));
     }
-    let dirs = ProjectDirs::from("", "", "aitui").context("resolve data dir")?;
-    Ok(dirs.data_dir().join("sessions"))
+    // ponytail: XDG_DATA_HOME or ~/.local/share — no directories crate
+    let base = std::env::var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .context("resolve data dir")?;
+    Ok(base.join("aitui/sessions"))
 }
 
 pub fn relative_time(ts: u64) -> String {
@@ -188,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_removes_session_file_and_index_entry() {
+    fn delete_removes_session_file() {
         let _guard = TEST_DIR_LOCK.lock().unwrap();
         let tmp = std::env::temp_dir().join(format!("aitui-test-{}", new_session_id()));
         std::fs::create_dir_all(&tmp).unwrap();
@@ -217,7 +180,7 @@ mod tests {
     }
 
     #[test]
-    fn save_rebuilds_index_when_corrupt() {
+    fn list_reads_sessions_from_disk() {
         let _guard = TEST_DIR_LOCK.lock().unwrap();
         let tmp = std::env::temp_dir().join(format!("aitui-test-{}", new_session_id()));
         std::fs::create_dir_all(&tmp).unwrap();
@@ -237,22 +200,6 @@ mod tests {
             })
             .unwrap();
         }
-        assert_eq!(list().unwrap().len(), 2);
-
-        std::fs::write(tmp.join("index.json"), "{not json").unwrap();
-        save(&Session {
-            id: "s1".into(),
-            title: "one".into(),
-            created_at: 1,
-            updated_at: 2,
-            messages: vec![Message {
-                role: "user".into(),
-                content: "one".into(),
-                thinking: String::new(),
-            }],
-        })
-        .unwrap();
-
         let metas = list().unwrap();
         assert_eq!(metas.len(), 2);
         assert!(metas.iter().any(|m| m.id == "s1"));

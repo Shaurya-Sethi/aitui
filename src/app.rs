@@ -37,8 +37,7 @@ pub struct App {
     pub status: Option<String>,
     pub resume_overlay: Option<ResumeOverlay>,
     pub chat_width: u16,
-    pub md_cache: HashMap<usize, Vec<Line<'static>>>,
-    pub md_cache_key: HashMap<usize, (String, u16)>,
+    pub md_cache: HashMap<usize, ((String, u16), Vec<Line<'static>>)>,
     pub chat_lines: Vec<Line<'static>>,
     pub stream_pulse: bool,
     stream_frame: u8,
@@ -62,7 +61,6 @@ impl App {
             resume_overlay: None,
             chat_width: 80,
             md_cache: HashMap::new(),
-            md_cache_key: HashMap::new(),
             chat_lines: Vec::new(),
             stream_pulse: false,
             stream_frame: 0,
@@ -77,7 +75,6 @@ impl App {
         self.session_created = now_secs();
         self.messages.clear();
         self.md_cache.clear();
-        self.md_cache_key.clear();
         self.chat_lines.clear();
         self.scroll = 0;
         self.auto_scroll = true;
@@ -103,26 +100,10 @@ impl App {
                     return Action::Quit;
                 }
             }
-            KeyCode::Up if input_is_empty(&self.input) => {
-                self.auto_scroll = false;
-                self.scroll = self.scroll.saturating_sub(1);
-            }
-            KeyCode::Down if input_is_empty(&self.input) => {
-                self.scroll = (self.scroll + 1).min(self.max_scroll(self.viewport_height));
-                if self.scroll >= self.max_scroll(self.viewport_height) {
-                    self.auto_scroll = true;
-                }
-            }
-            KeyCode::PageUp if input_is_empty(&self.input) => {
-                self.auto_scroll = false;
-                self.scroll = self.scroll.saturating_sub(5);
-            }
-            KeyCode::PageDown if input_is_empty(&self.input) => {
-                self.scroll = (self.scroll + 5).min(self.max_scroll(self.viewport_height));
-                if self.scroll >= self.max_scroll(self.viewport_height) {
-                    self.auto_scroll = true;
-                }
-            }
+            KeyCode::Up if input_is_empty(&self.input) => self.scroll_by(-1),
+            KeyCode::Down if input_is_empty(&self.input) => self.scroll_by(1),
+            KeyCode::PageUp if input_is_empty(&self.input) => self.scroll_by(-5),
+            KeyCode::PageDown if input_is_empty(&self.input) => self.scroll_by(5),
             _ => {
                 self.input.input_without_shortcuts(Input::from(key));
             }
@@ -201,16 +182,8 @@ impl App {
             return;
         }
         match mouse.kind {
-            MouseEventKind::ScrollUp => {
-                self.auto_scroll = false;
-                self.scroll = self.scroll.saturating_sub(3);
-            }
-            MouseEventKind::ScrollDown => {
-                self.scroll = (self.scroll + 3).min(self.max_scroll(self.viewport_height));
-                if self.scroll >= self.max_scroll(self.viewport_height) {
-                    self.auto_scroll = true;
-                }
-            }
+            MouseEventKind::ScrollUp => self.scroll_by(-3),
+            MouseEventKind::ScrollDown => self.scroll_by(3),
             _ => {}
         }
     }
@@ -271,6 +244,19 @@ impl App {
         }
     }
 
+    fn scroll_by(&mut self, delta: i32) {
+        let max = self.max_scroll(self.viewport_height);
+        if delta < 0 {
+            self.auto_scroll = false;
+            self.scroll = self.scroll.saturating_sub((-delta) as usize);
+        } else {
+            self.scroll = (self.scroll + delta as usize).min(max);
+            if self.scroll >= max {
+                self.auto_scroll = true;
+            }
+        }
+    }
+
     pub fn sync_scroll(&mut self, viewport_height: usize) {
         if self.auto_scroll {
             self.scroll = self.max_scroll(viewport_height);
@@ -281,30 +267,22 @@ impl App {
         if width != self.chat_width {
             self.chat_width = width;
             self.md_cache.clear();
-            self.md_cache_key.clear();
         }
 
         let inner = width.saturating_sub(6);
         let mut lines: Vec<Line<'static>> = Vec::new();
 
-        let messages: Vec<(usize, String, String, String)> = self
-            .messages
-            .iter()
-            .enumerate()
-            .map(|(i, m)| (i, m.role.clone(), m.thinking.clone(), m.content.clone()))
-            .collect();
-
-        for (idx, (i, role, thinking, content)) in messages.iter().enumerate() {
+        for idx in 0..self.messages.len() {
             if idx > 0 {
                 lines.push(Line::from(""));
             }
 
-            if role == "user" {
+            if self.messages[idx].role == "user" {
                 lines.push(Line::from(vec![
                     Span::styled("╭─ ", self.theme.style_user_border()),
                     Span::styled("You ", self.theme.style_user_border().bold()),
                 ]));
-                for wrapped in wrap_text(content, inner) {
+                for wrapped in wrap_text(&self.messages[idx].content, inner) {
                     lines.push(Line::from(vec![
                         Span::styled("│ ", self.theme.style_user_border()),
                         Span::styled(wrapped.clone(), self.theme.style_user()),
@@ -322,19 +300,19 @@ impl App {
                         self.theme.style_assistant_border().bold(),
                     ),
                 ]));
-                if !thinking.is_empty() {
+                if !self.messages[idx].thinking.is_empty() {
                     lines.push(Line::from(vec![
                         Span::styled("│ ", self.theme.style_assistant_border()),
                         Span::styled("thinking ", self.theme.style_thinking().bold()),
                     ]));
-                    for wrapped in wrap_text(thinking, inner) {
+                    for wrapped in wrap_text(&self.messages[idx].thinking, inner) {
                         lines.push(Line::from(vec![
                             Span::styled("│ ", self.theme.style_assistant_border()),
                             Span::styled(wrapped.clone(), self.theme.style_thinking()),
                         ]));
                     }
                 }
-                for rendered in self.cached_render(*i, thinking, content, width) {
+                for rendered in self.cached_render(idx, width) {
                     let mut spans = vec![Span::styled("│ ", self.theme.style_assistant_border())];
                     spans.extend(rendered.spans);
                     lines.push(Line::from(spans));
@@ -349,28 +327,21 @@ impl App {
         self.chat_lines = lines;
     }
 
-    fn cached_render(
-        &mut self,
-        idx: usize,
-        thinking: &str,
-        content: &str,
-        width: u16,
-    ) -> Vec<Line<'static>> {
-        let key = (format!("{thinking}\0{content}"), width);
-        if self.md_cache_key.get(&idx) == Some(&key) {
-            if let Some(cached) = self.md_cache.get(&idx) {
+    fn cached_render(&mut self, idx: usize, width: u16) -> Vec<Line<'static>> {
+        let msg = &self.messages[idx];
+        let key = (format!("{}\0{}", msg.thinking, msg.content), width);
+        if let Some((cached_key, cached)) = self.md_cache.get(&idx) {
+            if cached_key == &key {
                 return cached.clone();
             }
         }
-        let rendered = crate::markdown::render(content, width.saturating_sub(6), &self.theme);
-        self.md_cache_key.insert(idx, key);
-        self.md_cache.insert(idx, rendered.clone());
+        let rendered = crate::markdown::render(&msg.content, width.saturating_sub(6), &self.theme);
+        self.md_cache.insert(idx, (key, rendered.clone()));
         rendered
     }
 
     fn invalidate_cache(&mut self, idx: usize) {
         self.md_cache.remove(&idx);
-        self.md_cache_key.remove(&idx);
     }
 
     fn send_input(&mut self) -> Action {
@@ -443,7 +414,6 @@ impl App {
                 self.session_created = session.created_at;
                 self.messages = session.messages;
                 self.md_cache.clear();
-                self.md_cache_key.clear();
                 self.auto_scroll = false;
                 self.scroll = 0;
                 self.status = Some(format!("Resumed: {}", session.title));
@@ -724,10 +694,7 @@ fn wrap_text(text: &str, width: u16) -> Vec<String> {
             if line.is_empty() {
                 vec![String::new()]
             } else {
-                textwrap::wrap(line, w)
-                    .into_iter()
-                    .map(|s| s.to_string())
-                    .collect()
+                crate::markdown::wrap_line(line, w)
             }
         })
         .collect()

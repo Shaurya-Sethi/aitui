@@ -3,6 +3,59 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::prelude::Stylize;
 use ratatui::text::{Line, Span};
 
+pub fn wrap_line(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+        let cur_len = current.chars().count();
+        if current.is_empty() {
+            if word_len > width {
+                push_long_word(&mut lines, word, width);
+            } else {
+                current = word.to_string();
+            }
+        } else if cur_len + 1 + word_len <= width {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut current));
+            if word_len > width {
+                push_long_word(&mut lines, word, width);
+            } else {
+                current = word.to_string();
+            }
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn push_long_word(lines: &mut Vec<String>, word: &str, width: usize) {
+    let mut chunk = String::new();
+    for ch in word.chars() {
+        if chunk.chars().count() >= width {
+            lines.push(chunk);
+            chunk = String::new();
+        }
+        chunk.push(ch);
+    }
+    if !chunk.is_empty() {
+        lines.push(chunk);
+    }
+}
+
 pub fn render(md: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     let wrap_width = width.saturating_sub(4).max(10) as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -69,7 +122,7 @@ pub fn render(md: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
                     lines.push(Line::from(Span::styled("┌", theme.style_code_border())));
                 }
                 for cl in &code_lines {
-                    let wrapped = textwrap::wrap(cl, wrap_width.saturating_sub(4));
+                    let wrapped = wrap_line(cl, wrap_width.saturating_sub(4));
                     if wrapped.is_empty() {
                         lines.push(Line::from(vec![
                             Span::styled("│ ", theme.style_code_border()),
@@ -79,7 +132,7 @@ pub fn render(md: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
                         for part in wrapped {
                             lines.push(Line::from(vec![
                                 Span::styled("│ ", theme.style_code_border()),
-                                Span::styled(part.to_string(), theme.style_code()),
+                                Span::styled(part, theme.style_code()),
                             ]));
                         }
                     }
@@ -191,12 +244,11 @@ fn wrap_spans(spans: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>> 
         return vec![spans.to_vec()];
     }
 
-    let wrapped = textwrap::wrap(&plain, width);
-    wrapped
+    wrap_line(&plain, width)
         .into_iter()
         .map(|w| {
             vec![Span::styled(
-                w.to_string(),
+                w,
                 spans.first().map(|s| s.style).unwrap_or_default(),
             )]
         })
@@ -206,6 +258,12 @@ fn wrap_spans(spans: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrap_line_breaks_at_word_boundary() {
+        let lines = wrap_line("hello world foo bar", 10);
+        assert_eq!(lines, vec!["hello", "world foo", "bar"]);
+    }
 
     #[test]
     fn fenced_code_block_renders_with_gutter() {
