@@ -21,10 +21,9 @@ use ratatui::Terminal;
 use std::io::{stdout, Result};
 use std::time::Duration;
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let args = config::parse_args();
-    let config = Config::load(&args);
+    let config = Config::load();
     let mut app = App::new(config);
 
     enable_raw_mode()?;

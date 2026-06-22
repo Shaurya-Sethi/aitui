@@ -22,7 +22,7 @@ pub struct App {
     pub config: Config,
     pub messages: Vec<Message>,
     pub session_id: String,
-    pub session_created: u64,
+    session_created: Option<u64>,
     pub input: TextArea<'static>,
     pub scroll: usize,
     pub auto_scroll: bool,
@@ -42,7 +42,7 @@ impl App {
             config,
             messages: Vec::new(),
             session_id: String::new(),
-            session_created: 0,
+            session_created: None,
             input: new_input(),
             scroll: 0,
             auto_scroll: true,
@@ -61,7 +61,7 @@ impl App {
 
     fn start_new_session(&mut self) {
         self.session_id = new_session_id();
-        self.session_created = now_secs();
+        self.session_created = None;
         self.messages.clear();
         self.md_cache.clear();
         self.chat_lines.clear();
@@ -392,7 +392,7 @@ impl App {
         match store::load(id) {
             Ok(session) => {
                 self.session_id = session.id;
-                self.session_created = session.created_at;
+                self.session_created = Some(session.created_at);
                 self.messages = session.messages;
                 self.md_cache.clear();
                 self.auto_scroll = false;
@@ -407,11 +407,16 @@ impl App {
         if self.messages.is_empty() {
             return Ok(());
         }
+        let now = now_secs();
+        let created_at = self.session_created.unwrap_or(now);
+        if self.session_created.is_none() {
+            self.session_created = Some(created_at);
+        }
         let session = Session {
             id: self.session_id.clone(),
             title: title_from_messages(&self.messages),
-            created_at: self.session_created,
-            updated_at: now_secs(),
+            created_at,
+            updated_at: now,
             messages: self.messages.clone(),
         };
         store::save(&session)?;
@@ -453,18 +458,11 @@ fn new_input() -> TextArea<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
-    fn test_config() -> Config {
-        Config {
-            base_url: "http://localhost:11434/v1".into(),
-            model: "test".into(),
-            api_key: None,
-        }
-    }
-
     fn app_with_long_chat() -> App {
-        let mut app = App::new(test_config());
+        let mut app = App::new(Config::for_test());
         let mut content = String::new();
         for i in 0..40 {
             content.push_str(&format!("chat-line-{i:02}\n"));
@@ -528,49 +526,55 @@ mod tests {
         assert_eq!(app.scroll, 0);
     }
 
-    #[test]
-    fn alt_enter_inserts_newline_without_sending() {
-        let mut app = App::new(test_config());
-        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()));
-        app.handle_key(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::ALT,
-        ));
-        assert_eq!(app.input.lines(), ["x", ""]);
-        assert!(app.messages.is_empty());
-    }
-
-    #[test]
-    fn ctrl_j_inserts_newline_without_deleting_line() {
-        let mut app = App::new(test_config());
-        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()));
-        app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::empty()));
-        app.handle_key(KeyEvent::new(
-            KeyCode::Char('j'),
-            KeyModifiers::CONTROL,
-        ));
-        assert_eq!(app.input.lines(), ["ab", ""]);
-        assert!(app.messages.is_empty());
-    }
-
-    #[test]
-    fn shift_enter_inserts_newline_without_sending() {
-        let mut app = App::new(test_config());
-        for c in ['f', 'o', 'o'] {
-            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()));
+    fn type_chars(app: &mut App, chars: &[char]) {
+        for c in chars {
+            app.handle_key(KeyEvent::new(KeyCode::Char(*c), KeyModifiers::empty()));
         }
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
-        app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::empty()));
-        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()));
-        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty()));
-
-        assert_eq!(app.input.lines(), ["foo", "bar"]);
-        assert!(app.messages.is_empty());
     }
 
-    #[tokio::test]
+    #[test]
+    fn modified_enter_inserts_newline_without_sending() {
+        struct Case {
+            before: &'static [char],
+            newline: KeyEvent,
+            after: &'static [char],
+            expected: &'static [&'static str],
+        }
+
+        let cases = [
+            Case {
+                before: &['x'],
+                newline: KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
+                after: &[],
+                expected: &["x", ""],
+            },
+            Case {
+                before: &['a', 'b'],
+                newline: KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+                after: &[],
+                expected: &["ab", ""],
+            },
+            Case {
+                before: &['f', 'o', 'o'],
+                newline: KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+                after: &['b', 'a', 'r'],
+                expected: &["foo", "bar"],
+            },
+        ];
+
+        for case in cases {
+            let mut app = App::new(Config::for_test());
+            type_chars(&mut app, case.before);
+            app.handle_key(case.newline);
+            type_chars(&mut app, case.after);
+            assert_eq!(app.input.lines(), case.expected);
+            assert!(app.messages.is_empty());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn plain_enter_sends_message() {
-        let mut app = App::new(test_config());
+        let mut app = App::new(Config::for_test());
         app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::empty()));
         app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
@@ -595,7 +599,7 @@ mod tests {
 
     #[test]
     fn start_new_session_clears_messages_and_assigns_new_id() {
-        let mut app = App::new(test_config());
+        let mut app = App::new(Config::for_test());
         let old_id = app.session_id.clone();
         app.messages.push(Message {
             role: "user".into(),
@@ -633,7 +637,7 @@ mod tests {
             .unwrap();
         }
 
-        let mut app = App::new(test_config());
+        let mut app = App::new(Config::for_test());
         app.resume_overlay = Some(ResumeOverlay {
             sessions: vec![
                 SessionMeta {

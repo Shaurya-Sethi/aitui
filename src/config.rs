@@ -1,13 +1,6 @@
 use std::env;
 use std::process;
 
-#[derive(Debug, Default)]
-pub struct CliArgs {
-    pub url: Option<String>,
-    pub model: Option<String>,
-    pub api_key: Option<String>,
-}
-
 const HELP: &str = "\
 Lightweight terminal chat UI
 
@@ -25,27 +18,6 @@ Environment variables (used when flags are omitted):
   AITUI_API_KEY    API key
 ";
 
-pub fn parse_args() -> CliArgs {
-    let mut args = env::args().skip(1);
-    let mut out = CliArgs::default();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-h" | "--help" => {
-                print!("{HELP}");
-                process::exit(0);
-            }
-            "--url" => out.url = args.next(),
-            "--model" => out.model = args.next(),
-            "--api-key" => out.api_key = args.next(),
-            other => {
-                eprintln!("unknown argument: {other}\n\n{HELP}");
-                process::exit(1);
-            }
-        }
-    }
-    out
-}
-
 #[derive(Debug, Clone)]
 pub struct Config {
     pub base_url: String,
@@ -54,13 +26,31 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn load(args: &CliArgs) -> Self {
-        let base_url = env_or(args.url.clone(), "AITUI_BASE_URL")
+    pub fn load() -> Self {
+        let mut url = None;
+        let mut model = None;
+        let mut api_key = None;
+        let mut args = env::args().skip(1);
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "-h" | "--help" => {
+                    print!("{HELP}");
+                    process::exit(0);
+                }
+                "--url" => url = args.next(),
+                "--model" => model = args.next(),
+                "--api-key" => api_key = args.next(),
+                other => {
+                    eprintln!("unknown argument: {other}\n\n{HELP}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        let base_url = env_or(url, "AITUI_BASE_URL")
             .unwrap_or_else(|| "http://localhost:11434/v1".into());
-
-        let model = env_or(args.model.clone(), "AITUI_MODEL").unwrap_or_else(|| "llama3".into());
-
-        let api_key = env_or(args.api_key.clone(), "AITUI_API_KEY");
+        let model = env_or(model, "AITUI_MODEL").unwrap_or_else(|| "llama3".into());
+        let api_key = env_or(api_key, "AITUI_API_KEY");
 
         Self {
             base_url: normalize_url(&base_url),
@@ -79,6 +69,17 @@ impl Config {
                 }
             })
             .unwrap_or_else(|| self.base_url.clone())
+    }
+}
+
+#[cfg(test)]
+impl Config {
+    pub fn for_test() -> Self {
+        Self {
+            base_url: "http://localhost:11434/v1".into(),
+            model: "test".into(),
+            api_key: None,
+        }
     }
 }
 

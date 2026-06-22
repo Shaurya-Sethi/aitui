@@ -1,6 +1,5 @@
 use crate::config::Config;
 use crate::store::Message;
-use futures_util::StreamExt;
 use reqwest::Client;
 use serde::Serialize;
 use std::time::Duration;
@@ -72,7 +71,7 @@ async fn do_stream(
         req = req.bearer_auth(key);
     }
 
-    let response = req
+    let mut response = req
         .send()
         .await
         .map_err(|e| format!("request failed: {e}"))?;
@@ -82,11 +81,13 @@ async fn do_stream(
         return Err(format!("HTTP {status}: {text}"));
     }
 
-    let mut stream = response.bytes_stream();
     let mut buffer = String::new();
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("stream read: {e}"))?;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("stream read: {e}"))?
+    {
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
         while let Some(pos) = buffer.find('\n') {
@@ -111,7 +112,8 @@ async fn emit_sse_line(line: &str, tx: &mpsc::Sender<ChatEvent>) -> Result<bool,
     if line.is_empty() {
         return Ok(false);
     }
-    for event in parse_sse_line(line) {
+    let mut events = parse_sse_line(line);
+    while let Some(event) = events.next() {
         let done = matches!(event, ChatEvent::Done);
         let _ = tx.send(event).await;
         if done {
@@ -121,60 +123,99 @@ async fn emit_sse_line(line: &str, tx: &mpsc::Sender<ChatEvent>) -> Result<bool,
     Ok(false)
 }
 
-fn parse_sse_line(line: &str) -> Vec<ChatEvent> {
+fn parse_sse_line(line: &str) -> SseEvents {
+    let mut out = SseEvents::default();
     let line = line.trim();
     if line.is_empty() {
-        return Vec::new();
+        return out;
     }
 
     // OpenAI SSE uses "data: …"; some providers stream raw NDJSON lines.
     let payload = line.strip_prefix("data: ").unwrap_or(line);
     if payload == "[DONE]" {
-        return vec![ChatEvent::Done];
+        out.push(ChatEvent::Done);
+        return out;
     }
 
     let Ok(json) = serde_json::from_str::<serde_json::Value>(payload) else {
-        return Vec::new();
+        return out;
     };
 
     if json.get("done").and_then(|v| v.as_bool()) == Some(true) {
-        return vec![ChatEvent::Done];
+        out.push(ChatEvent::Done);
+        return out;
     }
 
     let delta = &json["choices"][0]["delta"];
-    let mut events = Vec::new();
     for key in ["reasoning_content", "reasoning", "thinking"] {
         if let Some(text) = delta[key].as_str() {
             if !text.is_empty() {
-                events.push(ChatEvent::ThinkingToken(text.to_string()));
+                out.push(ChatEvent::ThinkingToken(text.to_string()));
                 break;
             }
         }
     }
     if let Some(content) = delta["content"].as_str() {
         if !content.is_empty() {
-            events.push(ChatEvent::Token(content.to_string()));
+            out.push(ChatEvent::Token(content.to_string()));
         }
     }
 
-    events
+    out
+}
+
+#[derive(Default)]
+struct SseEvents {
+    events: [Option<ChatEvent>; 2],
+    len: usize,
+}
+
+impl SseEvents {
+    fn push(&mut self, event: ChatEvent) {
+        if self.len < self.events.len() {
+            self.events[self.len] = Some(event);
+            self.len += 1;
+        }
+    }
+
+    fn next(&mut self) -> Option<ChatEvent> {
+        if self.len == 0 {
+            return None;
+        }
+        let event = self.events[0].take()?;
+        for i in 1..self.len {
+            self.events[i - 1] = self.events[i].take();
+        }
+        self.events[self.len - 1] = None;
+        self.len -= 1;
+        Some(event)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn collect_events(line: &str) -> Vec<ChatEvent> {
+        let mut events = parse_sse_line(line);
+        let mut out = Vec::new();
+        while let Some(event) = events.next() {
+            out.push(event);
+        }
+        out
+    }
+
     #[test]
     fn parse_token_chunk() {
         let line = r#"data: {"choices":[{"delta":{"content":"hi"}}]}"#;
-        let events = parse_sse_line(line);
+        let events = collect_events(line);
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], ChatEvent::Token(t) if t == "hi"));
     }
 
     #[test]
     fn parse_done() {
-        let events = parse_sse_line("data: [DONE]");
+        let events = collect_events("data: [DONE]");
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], ChatEvent::Done));
     }
@@ -182,7 +223,7 @@ mod tests {
     #[test]
     fn parse_raw_ndjson_token() {
         let line = r#"{"choices":[{"delta":{"content":"hi"}}]}"#;
-        let events = parse_sse_line(line);
+        let events = collect_events(line);
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], ChatEvent::Token(t) if t == "hi"));
     }
@@ -190,7 +231,7 @@ mod tests {
     #[test]
     fn parse_reasoning_token() {
         let line = r#"data: {"choices":[{"delta":{"reasoning_content":"hmm"}}]}"#;
-        let events = parse_sse_line(line);
+        let events = collect_events(line);
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], ChatEvent::ThinkingToken(t) if t == "hmm"));
     }
@@ -198,7 +239,7 @@ mod tests {
     #[test]
     fn parse_reasoning_and_content_same_delta() {
         let line = r#"data: {"choices":[{"delta":{"reasoning_content":"hmm","content":"hi"}}]}"#;
-        let events = parse_sse_line(line);
+        let events = collect_events(line);
         assert_eq!(events.len(), 2);
         assert!(matches!(&events[0], ChatEvent::ThinkingToken(t) if t == "hmm"));
         assert!(matches!(&events[1], ChatEvent::Token(t) if t == "hi"));

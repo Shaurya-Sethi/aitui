@@ -44,9 +44,6 @@ pub fn list() -> Result<Vec<SessionMeta>> {
         let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        if name == "index" {
-            continue;
-        }
         if let Ok(session) = load(name) {
             metas.push(SessionMeta {
                 id: session.id,

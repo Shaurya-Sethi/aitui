@@ -119,14 +119,6 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    fn test_config() -> Config {
-        Config {
-            base_url: "http://localhost:11434/v1".into(),
-            model: "test".into(),
-            api_key: None,
-        }
-    }
-
     fn chat_text(backend: &TestBackend) -> String {
         let buf = backend.buffer();
         let mut out = String::new();
@@ -159,7 +151,7 @@ mod tests {
 
     #[test]
     fn draw_honors_manual_scroll_offset() {
-        let mut app = App::new(test_config());
+        let mut app = App::new(Config::for_test());
         let mut content = String::new();
         for i in 0..40 {
             content.push_str(&format!("marker-{i:02}\n"));
