@@ -1,6 +1,7 @@
-use crate::theme::Theme;
+use crate::theme;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::prelude::Stylize;
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
 pub fn wrap_line(text: &str, width: usize) -> Vec<String> {
@@ -56,12 +57,13 @@ fn push_long_word(lines: &mut Vec<String>, word: &str, width: usize) {
     }
 }
 
-pub fn render(md: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+pub fn render(md: &str, width: u16) -> Vec<Line<'static>> {
     let wrap_width = width.saturating_sub(4).max(10) as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut current_spans: Vec<Span<'static>> = Vec::new();
     let mut bold = false;
     let mut italic = false;
+    let mut strikethrough = false;
     let mut in_code_block = false;
     let mut code_lang = String::new();
     let mut code_lines: Vec<String> = Vec::new();
@@ -102,6 +104,8 @@ pub fn render(md: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
             Event::End(TagEnd::Strong) => bold = false,
             Event::Start(Tag::Emphasis) => italic = true,
             Event::End(TagEnd::Emphasis) => italic = false,
+            Event::Start(Tag::Strikethrough) => strikethrough = true,
+            Event::End(TagEnd::Strikethrough) => strikethrough = false,
             Event::Start(Tag::CodeBlock(kind)) => {
                 flush_inline(&mut current_spans, &mut lines);
                 in_code_block = true;
@@ -115,29 +119,29 @@ pub fn render(md: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
                 in_code_block = false;
                 if !code_lang.is_empty() {
                     lines.push(Line::from(vec![
-                        Span::styled("┌ ", theme.style_code_border()),
-                        Span::styled(code_lang.clone(), theme.style_muted().italic()),
+                        Span::styled("┌ ", theme::style_code_border()),
+                        Span::styled(code_lang.clone(), theme::style_muted().italic()),
                     ]));
                 } else {
-                    lines.push(Line::from(Span::styled("┌", theme.style_code_border())));
+                    lines.push(Line::from(Span::styled("┌", theme::style_code_border())));
                 }
                 for cl in &code_lines {
                     let wrapped = wrap_line(cl, wrap_width.saturating_sub(4));
                     if wrapped.is_empty() {
                         lines.push(Line::from(vec![
-                            Span::styled("│ ", theme.style_code_border()),
-                            Span::styled(" ", theme.style_code()),
+                            Span::styled("│ ", theme::style_code_border()),
+                            Span::styled(" ", theme::style_code()),
                         ]));
                     } else {
                         for part in wrapped {
                             lines.push(Line::from(vec![
-                                Span::styled("│ ", theme.style_code_border()),
-                                Span::styled(part, theme.style_code()),
+                                Span::styled("│ ", theme::style_code_border()),
+                                Span::styled(part, theme::style_code()),
                             ]));
                         }
                     }
                 }
-                lines.push(Line::from(Span::styled("└", theme.style_code_border())));
+                lines.push(Line::from(Span::styled("└", theme::style_code_border())));
                 lines.push(Line::from(""));
                 code_lang.clear();
                 code_lines.clear();
@@ -158,7 +162,7 @@ pub fn render(md: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
                 } else {
                     "• ".to_string()
                 };
-                current_spans.push(Span::styled(bullet, theme.style_muted()));
+                current_spans.push(Span::styled(bullet, theme::style_muted()));
             }
             Event::End(TagEnd::Item) => {
                 flush_inline(&mut current_spans, &mut lines);
@@ -166,14 +170,14 @@ pub fn render(md: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
             Event::Start(Tag::Link { dest_url, .. }) => {
                 current_spans.push(Span::styled(
                     format!(" ({dest_url})"),
-                    theme.style_muted(),
+                    theme::style_muted(),
                 ));
             }
             Event::End(TagEnd::Link) => {}
             Event::Rule => {
                 flush_inline(&mut current_spans, &mut lines);
                 let rule = "─".repeat(wrap_width.min(40));
-                lines.push(Line::from(Span::styled(rule, theme.style_muted())));
+                lines.push(Line::from(Span::styled(rule, theme::style_muted())));
                 lines.push(Line::from(""));
             }
             Event::Code(text) => {
@@ -184,7 +188,7 @@ pub fn render(md: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
                 } else {
                     current_spans.push(Span::styled(
                         text.to_string(),
-                        theme.style_inline_code(),
+                        theme::style_inline_code(),
                     ));
                 }
             }
@@ -192,7 +196,7 @@ pub fn render(md: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
                 if in_code_block {
                     code_lines.push(text.to_string());
                 } else {
-                    let style = base_style(theme, bold, italic);
+                    let style = base_style(bold, italic, strikethrough);
                     current_spans.push(Span::styled(text.to_string(), style));
                 }
             }
@@ -202,7 +206,7 @@ pub fn render(md: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
             Event::Start(Tag::Image { dest_url, .. }) => {
                 current_spans.push(Span::styled(
                     format!("[image: {dest_url}]"),
-                    theme.style_muted(),
+                    theme::style_muted(),
                 ));
             }
             _ => {}
@@ -218,13 +222,16 @@ pub fn render(md: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     lines
 }
 
-fn base_style(theme: &Theme, bold: bool, italic: bool) -> ratatui::style::Style {
-    let mut style = theme.style_assistant();
+fn base_style(bold: bool, italic: bool, strikethrough: bool) -> ratatui::style::Style {
+    let mut style = theme::style_assistant();
     if bold {
         style = style.bold();
     }
     if italic {
         style = style.italic();
+    }
+    if strikethrough {
+        style = style.crossed_out();
     }
     style
 }
@@ -267,9 +274,8 @@ mod tests {
 
     #[test]
     fn fenced_code_block_renders_with_gutter() {
-        let theme = Theme;
         let md = "```rust\nfn main() {}\n```";
-        let lines = render(md, 60, &theme);
+        let lines = render(md, 60);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -277,5 +283,16 @@ mod tests {
         assert!(text.contains("rust"));
         assert!(text.contains("fn main()"));
         assert!(text.contains("│"));
+    }
+
+    #[test]
+    fn strikethrough_renders_crossed_out() {
+        let lines = render("~~gone~~", 40);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text.contains("gone"));
+        assert!(lines[0].spans[0].style.add_modifier.contains(Modifier::CROSSED_OUT));
     }
 }

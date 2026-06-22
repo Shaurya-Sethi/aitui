@@ -1,6 +1,5 @@
 use crate::config::Config;
 use crate::store::Message;
-use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::Serialize;
@@ -37,7 +36,7 @@ pub fn stream_completion(
     let messages = messages.to_vec();
     tokio::spawn(async move {
         if let Err(e) = do_stream(&config, &messages, &tx).await {
-            let _ = tx.send(ChatEvent::Error(e.to_string())).await;
+            let _ = tx.send(ChatEvent::Error(e)).await;
         }
     });
     rx
@@ -47,12 +46,12 @@ async fn do_stream(
     config: &Config,
     messages: &[Message],
     tx: &mpsc::Sender<ChatEvent>,
-) -> Result<()> {
+) -> Result<(), String> {
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(120))
         .build()
-        .context("HTTP client")?;
+        .map_err(|e| format!("HTTP client: {e}"))?;
     let url = format!("{}/chat/completions", config.base_url);
     let api_messages: Vec<ApiMessage<'_>> = messages
         .iter()
@@ -73,18 +72,21 @@ async fn do_stream(
         req = req.bearer_auth(key);
     }
 
-    let response = req.send().await.context("request failed")?;
+    let response = req
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
-        anyhow::bail!("HTTP {status}: {text}");
+        return Err(format!("HTTP {status}: {text}"));
     }
 
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("stream read")?;
+        let chunk = chunk.map_err(|e| format!("stream read: {e}"))?;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
         while let Some(pos) = buffer.find('\n') {
@@ -105,7 +107,7 @@ async fn do_stream(
     Ok(())
 }
 
-async fn emit_sse_line(line: &str, tx: &mpsc::Sender<ChatEvent>) -> Result<bool> {
+async fn emit_sse_line(line: &str, tx: &mpsc::Sender<ChatEvent>) -> Result<bool, String> {
     if line.is_empty() {
         return Ok(false);
     }

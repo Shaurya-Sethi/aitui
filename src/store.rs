@@ -1,8 +1,9 @@
-use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+type Result<T> = std::result::Result<T, String>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Message {
@@ -34,8 +35,8 @@ pub fn list() -> Result<Vec<SessionMeta>> {
         return Ok(Vec::new());
     }
     let mut metas = Vec::new();
-    for entry in fs::read_dir(&dir)? {
-        let entry = entry?;
+    for entry in fs::read_dir(&dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
@@ -60,24 +61,23 @@ pub fn list() -> Result<Vec<SessionMeta>> {
 
 pub fn load(id: &str) -> Result<Session> {
     let path = sessions_dir()?.join(format!("{id}.json"));
-    let raw = fs::read_to_string(&path)
-        .with_context(|| format!("load session {}", path.display()))?;
-    serde_json::from_str(&raw).context("parse session")
+    let raw = fs::read_to_string(&path).map_err(|e| format!("load session {}: {e}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|e| format!("parse session: {e}"))
 }
 
 pub fn save(session: &Session) -> Result<()> {
     let dir = sessions_dir()?;
-    fs::create_dir_all(&dir)?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join(format!("{}.json", session.id));
-    fs::write(&path, serde_json::to_string_pretty(session)?)?;
-    Ok(())
+    let json = serde_json::to_string_pretty(session).map_err(|e| e.to_string())?;
+    fs::write(&path, json).map_err(|e| e.to_string())
 }
 
 pub fn delete(id: &str) -> Result<()> {
     let dir = sessions_dir()?;
     let path = dir.join(format!("{id}.json"));
     if path.exists() {
-        fs::remove_file(&path)?;
+        fs::remove_file(&path).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -115,7 +115,7 @@ fn sessions_dir() -> Result<PathBuf> {
     let base = std::env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
         .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .context("resolve data dir")?;
+        .map_err(|_| "resolve data dir".to_string())?;
     Ok(base.join("aitui/sessions"))
 }
 

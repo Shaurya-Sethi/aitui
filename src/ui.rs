@@ -1,5 +1,6 @@
 use crate::app::App;
 use crate::store;
+use crate::theme;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::prelude::Stylize;
 use ratatui::text::{Line, Span};
@@ -11,7 +12,7 @@ use ratatui::Frame;
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     frame.render_widget(
-        Block::default().style(ratatui::style::Style::default().bg(app.theme.bg())),
+        Block::default().style(ratatui::style::Style::default().bg(theme::bg())),
         area,
     );
 
@@ -38,19 +39,16 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let model = &app.config.model;
 
     let stream_indicator = if app.streaming {
-        let dot = if app.stream_pulse { "●" } else { "○" };
         Line::from(vec![
-            Span::styled(format!(" {dot} "), app.theme.style_streaming()),
-            Span::styled("streaming", app.theme.style_streaming().italic()),
+            Span::styled(" ● ", theme::style_streaming()),
+            Span::styled("streaming", theme::style_streaming().italic()),
         ])
     } else {
-        Line::from(Span::styled(" ready ", app.theme.style_muted()))
+        Line::from(Span::styled(" ready ", theme::style_muted()))
     };
 
     let title = format!(" {model} · {host} ");
-    let block = app
-        .theme
-        .block_header(&title)
+    let block = theme::block_header(&title)
         .title_alignment(ratatui::layout::Alignment::Left);
 
     let inner = block.inner(area);
@@ -66,8 +64,8 @@ fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
     app.rebuild_chat_lines(width);
 
     let block = Block::bordered()
-        .border_style(app.theme.style_assistant_border())
-        .style(ratatui::style::Style::default().bg(app.theme.bg()));
+        .border_style(theme::style_assistant_border())
+        .style(ratatui::style::Style::default().bg(theme::bg()));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -78,7 +76,7 @@ fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let scroll = app.scroll.min(app.max_scroll(viewport));
     let paragraph = Paragraph::new(app.chat_lines.clone())
-        .style(ratatui::style::Style::default().bg(app.theme.bg()))
+        .style(ratatui::style::Style::default().bg(theme::bg()))
         .scroll((scroll as u16, 0));
 
     frame.render_widget(paragraph, inner);
@@ -194,10 +192,10 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let hints = " ↑↓ scroll · Enter send · Shift+Enter/⌥Enter newline · /new · /resume · /quit ";
-    let mut spans = vec![Span::styled(hints, app.theme.style_muted())];
+    let mut spans = vec![Span::styled(hints, theme::style_muted())];
 
     if let Some(status) = &app.status {
-        spans.push(Span::styled(format!(" │ {status}"), app.theme.style_error()));
+        spans.push(Span::styled(format!(" │ {status}"), theme::style_error()));
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -208,7 +206,7 @@ fn draw_resume_overlay(frame: &mut Frame, app: &App) {
     let area = centered_rect(70, 70, frame.area());
     frame.render_widget(Clear, area);
 
-    let block = app.theme.block_overlay(" Resume session ");
+    let block = theme::block_overlay(" Resume session ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -232,16 +230,16 @@ fn draw_resume_overlay(frame: &mut Frame, app: &App) {
             };
             let time = store::relative_time(s.updated_at);
             Line::from(vec![
-                Span::styled(prefix, app.theme.style_accent()),
-                Span::styled(s.title.clone(), app.theme.style_assistant()),
-                Span::styled(format!("  {time}"), app.theme.style_muted()),
+                Span::styled(prefix, theme::style_accent()),
+                Span::styled(s.title.clone(), theme::style_assistant()),
+                Span::styled(format!("  {time}"), theme::style_muted()),
             ])
         })
         .collect();
 
     let help = Line::from(Span::styled(
         " ↑↓ select · Enter resume · Delete remove · Esc cancel ",
-        app.theme.style_muted(),
+        theme::style_muted(),
     ));
 
     let [list_area, help_area] =

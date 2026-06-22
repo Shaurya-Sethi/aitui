@@ -6,8 +6,7 @@ mod store;
 mod theme;
 mod ui;
 
-use anyhow::Result;
-use app::{Action, App};
+use app::App;
 use config::Config;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyboardEnhancementFlags,
@@ -19,7 +18,7 @@ use crossterm::terminal::{
 use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-use std::io::stdout;
+use std::io::{stdout, Result};
 use std::time::Duration;
 
 #[tokio::main]
@@ -66,7 +65,7 @@ fn run_loop(
         if event::poll(Duration::from_millis(50))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if app.handle_key(key) == Action::Quit {
+                    if app.handle_key(key) {
                         let _ = app.save_session();
                         break;
                     }

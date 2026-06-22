@@ -3,7 +3,7 @@ use crate::config::Config;
 use crate::store::{
     self, Message, Session, SessionMeta, new_session_id, now_secs, title_from_messages,
 };
-use crate::theme::Theme;
+use crate::theme;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::prelude::Stylize;
 use ratatui::style::Style;
@@ -12,11 +12,6 @@ use std::collections::HashMap;
 use tui_textarea::{Input, TextArea};
 use tokio::sync::mpsc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Action {
-    Continue,
-    Quit,
-}
 
 pub struct ResumeOverlay {
     pub sessions: Vec<SessionMeta>,
@@ -25,7 +20,6 @@ pub struct ResumeOverlay {
 
 pub struct App {
     pub config: Config,
-    pub theme: Theme,
     pub messages: Vec<Message>,
     pub session_id: String,
     pub session_created: u64,
@@ -39,8 +33,6 @@ pub struct App {
     pub chat_width: u16,
     pub md_cache: HashMap<usize, ((String, u16), Vec<Line<'static>>)>,
     pub chat_lines: Vec<Line<'static>>,
-    pub stream_pulse: bool,
-    stream_frame: u8,
     pub viewport_height: usize,
 }
 
@@ -48,11 +40,10 @@ impl App {
     pub fn new(config: Config) -> Self {
         let mut app = Self {
             config,
-            theme: Theme,
             messages: Vec::new(),
             session_id: String::new(),
             session_created: 0,
-            input: new_input(&Theme),
+            input: new_input(),
             scroll: 0,
             auto_scroll: true,
             streaming: false,
@@ -62,8 +53,6 @@ impl App {
             chat_width: 80,
             md_cache: HashMap::new(),
             chat_lines: Vec::new(),
-            stream_pulse: false,
-            stream_frame: 0,
             viewport_height: 1,
         };
         app.start_new_session();
@@ -81,23 +70,24 @@ impl App {
         self.streaming = false;
         self.stream_rx = None;
         self.status = None;
-        self.input = new_input(&self.theme);
+        self.input = new_input();
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent) -> Action {
+    /// Returns `true` when the app should quit.
+    pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         if self.resume_overlay.is_some() {
             return self.handle_resume_key(key);
         }
 
         if is_newline_key(&key) {
             self.input.insert_newline();
-            return Action::Continue;
+            return false;
         }
 
         match key.code {
             KeyCode::Enter => {
-                if self.send_input() == Action::Quit {
-                    return Action::Quit;
+                if self.send_input() {
+                    return true;
                 }
             }
             KeyCode::Up if input_is_empty(&self.input) => self.scroll_by(-1),
@@ -108,10 +98,10 @@ impl App {
                 self.input.input_without_shortcuts(Input::from(key));
             }
         }
-        Action::Continue
+        false
     }
 
-    fn handle_resume_key(&mut self, key: KeyEvent) -> Action {
+    fn handle_resume_key(&mut self, key: KeyEvent) -> bool {
         if matches!(key.code, KeyCode::Delete | KeyCode::Backspace)
             && key.modifiers.is_empty()
         {
@@ -119,7 +109,7 @@ impl App {
         }
 
         let Some(overlay) = self.resume_overlay.as_mut() else {
-            return Action::Continue;
+            return false;
         };
         match key.code {
             KeyCode::Esc => {
@@ -142,15 +132,15 @@ impl App {
             }
             _ => {}
         }
-        Action::Continue
+        false
     }
 
-    fn delete_selected_session(&mut self) -> Action {
+    fn delete_selected_session(&mut self) -> bool {
         let Some(overlay) = self.resume_overlay.as_mut() else {
-            return Action::Continue;
+            return false;
         };
         let Some(session) = overlay.sessions.get(overlay.selected) else {
-            return Action::Continue;
+            return false;
         };
         let id = session.id.clone();
         let title = session.title.clone();
@@ -172,9 +162,9 @@ impl App {
                     self.status = status;
                 }
             }
-            Err(e) => self.status = Some(e.to_string()),
+            Err(e) => self.status = Some(e),
         }
-        Action::Continue
+        false
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
@@ -189,16 +179,6 @@ impl App {
     }
 
     pub fn tick(&mut self) {
-        if self.streaming {
-            self.stream_frame = self.stream_frame.wrapping_add(1);
-            if self.stream_frame % 10 == 0 {
-                self.stream_pulse = !self.stream_pulse;
-            }
-        } else {
-            self.stream_frame = 0;
-            self.stream_pulse = false;
-        }
-
         let mut done = false;
         let mut error: Option<String> = None;
 
@@ -279,47 +259,47 @@ impl App {
 
             if self.messages[idx].role == "user" {
                 lines.push(Line::from(vec![
-                    Span::styled("╭─ ", self.theme.style_user_border()),
-                    Span::styled("You ", self.theme.style_user_border().bold()),
+                    Span::styled("╭─ ", theme::style_user_border()),
+                    Span::styled("You ", theme::style_user_border().bold()),
                 ]));
                 for wrapped in wrap_text(&self.messages[idx].content, inner) {
                     lines.push(Line::from(vec![
-                        Span::styled("│ ", self.theme.style_user_border()),
-                        Span::styled(wrapped.clone(), self.theme.style_user()),
+                        Span::styled("│ ", theme::style_user_border()),
+                        Span::styled(wrapped.clone(), theme::style_user()),
                     ]));
                 }
                 lines.push(Line::from(Span::styled(
                     "╰",
-                    self.theme.style_user_border(),
+                    theme::style_user_border(),
                 )));
             } else {
                 lines.push(Line::from(vec![
-                    Span::styled("╭─ ", self.theme.style_assistant_border()),
+                    Span::styled("╭─ ", theme::style_assistant_border()),
                     Span::styled(
                         "Assistant ",
-                        self.theme.style_assistant_border().bold(),
+                        theme::style_assistant_border().bold(),
                     ),
                 ]));
                 if !self.messages[idx].thinking.is_empty() {
                     lines.push(Line::from(vec![
-                        Span::styled("│ ", self.theme.style_assistant_border()),
-                        Span::styled("thinking ", self.theme.style_thinking().bold()),
+                        Span::styled("│ ", theme::style_assistant_border()),
+                        Span::styled("thinking ", theme::style_thinking().bold()),
                     ]));
                     for wrapped in wrap_text(&self.messages[idx].thinking, inner) {
                         lines.push(Line::from(vec![
-                            Span::styled("│ ", self.theme.style_assistant_border()),
-                            Span::styled(wrapped.clone(), self.theme.style_thinking()),
+                            Span::styled("│ ", theme::style_assistant_border()),
+                            Span::styled(wrapped.clone(), theme::style_thinking()),
                         ]));
                     }
                 }
                 for rendered in self.cached_render(idx, width) {
-                    let mut spans = vec![Span::styled("│ ", self.theme.style_assistant_border())];
+                    let mut spans = vec![Span::styled("│ ", theme::style_assistant_border())];
                     spans.extend(rendered.spans);
                     lines.push(Line::from(spans));
                 }
                 lines.push(Line::from(Span::styled(
                     "╰",
-                    self.theme.style_assistant_border(),
+                    theme::style_assistant_border(),
                 )));
             }
         }
@@ -335,7 +315,7 @@ impl App {
                 return cached.clone();
             }
         }
-        let rendered = crate::markdown::render(&msg.content, width.saturating_sub(6), &self.theme);
+        let rendered = crate::markdown::render(&msg.content, width.saturating_sub(6));
         self.md_cache.insert(idx, (key, rendered.clone()));
         rendered
     }
@@ -344,33 +324,34 @@ impl App {
         self.md_cache.remove(&idx);
     }
 
-    fn send_input(&mut self) -> Action {
+    /// Returns `true` when the app should quit.
+    fn send_input(&mut self) -> bool {
         let text = self.input.lines().join("\n").trim().to_string();
         if text.is_empty() {
-            return Action::Continue;
+            return false;
         }
 
         if text == "/quit" {
-            self.input = new_input(&self.theme);
-            return Action::Quit;
+            self.input = new_input();
+            return true;
         }
 
         if self.streaming {
-            return Action::Continue;
+            return false;
         }
 
-        self.input = new_input(&self.theme);
+        self.input = new_input();
 
         if text.trim() == "/resume" {
             self.open_resume();
-            return Action::Continue;
+            return false;
         }
 
         if text.trim() == "/new" {
             let _ = self.save_session();
             self.start_new_session();
             self.status = Some("New session".into());
-            return Action::Continue;
+            return false;
         }
 
         self.messages.push(Message {
@@ -388,7 +369,7 @@ impl App {
         self.auto_scroll = true;
         self.status = None;
         self.stream_rx = Some(stream_completion(&self.config, &self.messages));
-        Action::Continue
+        false
     }
 
     fn open_resume(&mut self) {
@@ -403,7 +384,7 @@ impl App {
                     });
                 }
             }
-            Err(e) => self.status = Some(e.to_string()),
+            Err(e) => self.status = Some(e),
         }
     }
 
@@ -418,11 +399,11 @@ impl App {
                 self.scroll = 0;
                 self.status = Some(format!("Resumed: {}", session.title));
             }
-            Err(e) => self.status = Some(e.to_string()),
+            Err(e) => self.status = Some(e),
         }
     }
 
-    pub fn save_session(&mut self) -> anyhow::Result<()> {
+    pub fn save_session(&mut self) -> Result<(), String> {
         if self.messages.is_empty() {
             return Ok(());
         }
@@ -458,14 +439,13 @@ fn is_newline_key(key: &KeyEvent) -> bool {
     }
 }
 
-fn new_input(theme: &Theme) -> TextArea<'static> {
+fn new_input() -> TextArea<'static> {
     let mut input = TextArea::default();
     input.set_placeholder_text("Type a message… (/new · /resume · /quit)");
     input.set_cursor_line_style(Style::default());
     input.set_block(
-        theme
-            .block_input(" Message ")
-            .style(Style::default().bg(theme.bg())),
+        theme::block_input(" Message ")
+            .style(Style::default().bg(theme::bg())),
     );
     input
 }

@@ -6,7 +6,6 @@ version = 4
 name = "aitui"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "crossterm",
  "futures-util",
  "pulldown-cmark",
@@ -23,12 +22,6 @@ name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
-
-[[package]]
-name = "anyhow"
-version = "1.0.102"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "atomic-waker"
