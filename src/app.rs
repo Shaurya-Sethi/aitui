@@ -654,6 +654,34 @@ mod tests {
         assert!(app.status.is_none());
     }
 
+    #[tokio::test]
+    async fn tick_applies_streamed_tokens_and_clears_streaming() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut app = App::new(Config::for_test());
+        app.messages.push(Message {
+            role: "user".into(),
+            content: "hi".into(),
+            thinking: String::new(),
+        });
+        app.messages.push(Message {
+            role: "assistant".into(),
+            content: String::new(),
+            thinking: String::new(),
+        });
+        app.streaming = true;
+        app.stream_rx = Some(rx);
+
+        tx.send(ChatEvent::Token("there".into())).await.unwrap();
+        tx.send(ChatEvent::Done).await.unwrap();
+        drop(tx);
+
+        app.tick();
+
+        assert_eq!(app.messages[1].content, "there");
+        assert!(!app.streaming);
+        assert!(app.stream_rx.is_none());
+    }
+
     #[test]
     fn delete_selected_session_clamps_selection() {
         let _guard = crate::store::TEST_DIR_LOCK.lock().unwrap();

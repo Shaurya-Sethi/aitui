@@ -21,7 +21,7 @@ use ratatui::Terminal;
 use std::io::{stdout, Result};
 use std::time::Duration;
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() -> Result<()> {
     let config = Config::load();
     let mut app = App::new(config);

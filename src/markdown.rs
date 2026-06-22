@@ -1,7 +1,6 @@
 use crate::theme;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::prelude::Stylize;
-use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
 pub fn wrap_line(text: &str, width: usize) -> Vec<String> {
@@ -265,6 +264,7 @@ fn wrap_spans(spans: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Modifier;
 
     #[test]
     fn wrap_line_breaks_at_word_boundary() {

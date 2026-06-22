@@ -250,4 +250,71 @@ mod tests {
         let events = collect_events("data: not-json");
         assert!(events.is_empty());
     }
+
+    /// Regression: `current_thread` runtime + blocking sync event loop never runs
+    /// `tokio::spawn` tasks, so streaming hangs forever with no output.
+    #[test]
+    fn stream_completion_runs_while_main_thread_polls() {
+        use crate::store::Message;
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+                        data: [DONE]\n\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                 Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+
+        rt.block_on(async {
+            let config = Config {
+                base_url: format!("http://{addr}/v1"),
+                model: "test".into(),
+                api_key: None,
+            };
+            let messages = vec![Message {
+                role: "user".into(),
+                content: "hello".into(),
+                thinking: String::new(),
+            }];
+
+            let mut rx = stream_completion(&config, &messages);
+            let mut got_token = false;
+            let mut got_done = false;
+            let deadline = Instant::now() + Duration::from_secs(5);
+
+            while Instant::now() < deadline {
+                while let Ok(event) = rx.try_recv() {
+                    match event {
+                        ChatEvent::Token(t) if t == "hi" => got_token = true,
+                        ChatEvent::Done => got_done = true,
+                        ChatEvent::Error(e) => panic!("stream error: {e}"),
+                        _ => {}
+                    }
+                }
+                if got_token && got_done {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+
+            assert!(got_token, "expected streamed token");
+            assert!(got_done, "expected stream completion");
+        });
+    }
 }
