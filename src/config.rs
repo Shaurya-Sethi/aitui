@@ -1,4 +1,5 @@
 use std::env;
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::process;
 
 const HELP: &str = "\
@@ -16,6 +17,8 @@ Environment variables (used when flags are omitted):
   AITUI_BASE_URL   OpenAI-compatible base URL
   AITUI_MODEL      Model name
   AITUI_API_KEY    API key
+
+Run `aitui` with no configuration to start interactive setup.
 ";
 
 #[derive(Debug, Clone)]
@@ -47,10 +50,20 @@ impl Config {
             }
         }
 
-        let base_url = env_or(url, "AITUI_BASE_URL")
-            .unwrap_or_else(|| "http://localhost:11434/v1".into());
-        let model = env_or(model, "AITUI_MODEL").unwrap_or_else(|| "llama3".into());
+        let base_url = env_or(url, "AITUI_BASE_URL");
+        let model = env_or(model, "AITUI_MODEL");
         let api_key = env_or(api_key, "AITUI_API_KEY");
+
+        let (base_url, model, api_key) = if base_url.is_none() || model.is_none() {
+            if io::stdin().is_terminal() {
+                interactive_setup(base_url, model, api_key)
+            } else {
+                eprintln!("configuration required. Set flags or env vars.\n\n{HELP}");
+                process::exit(1);
+            }
+        } else {
+            (base_url.unwrap(), model.unwrap(), api_key)
+        };
 
         Self {
             base_url: normalize_url(&base_url),
@@ -85,6 +98,45 @@ impl Config {
 
 fn env_or(cli: Option<String>, key: &str) -> Option<String> {
     cli.or_else(|| env::var(key).ok())
+}
+
+fn interactive_setup(
+    base_url: Option<String>,
+    model: Option<String>,
+    api_key: Option<String>,
+) -> (String, String, Option<String>) {
+    eprintln!("aitui setup\n");
+
+    let base_url = base_url.unwrap_or_else(|| prompt_required("Base URL"));
+    let model = model.unwrap_or_else(|| prompt_required("Model"));
+    let api_key = api_key.or_else(|| {
+        eprint!("API key (leave empty for local): ");
+        io::stderr().flush().ok();
+        let mut line = String::new();
+        io::stdin().lock().read_line(&mut line).ok();
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+
+    (base_url, model, api_key)
+}
+
+fn prompt_required(label: &str) -> String {
+    loop {
+        eprint!("{label}: ");
+        io::stderr().flush().ok();
+        let mut line = String::new();
+        io::stdin().lock().read_line(&mut line).ok();
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+        eprintln!("required");
+    }
 }
 
 fn normalize_url(url: &str) -> String {
