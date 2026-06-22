@@ -1,0 +1,734 @@
+use crate::chat::{stream_completion, ChatEvent};
+use crate::config::Config;
+use crate::store::{
+    self, Message, Session, SessionMeta, new_session_id, now_secs, title_from_messages,
+};
+use crate::theme::Theme;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use ratatui::prelude::Stylize;
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
+use std::collections::HashMap;
+use tui_textarea::{Input, TextArea};
+use tokio::sync::mpsc;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Continue,
+    Quit,
+}
+
+pub struct ResumeOverlay {
+    pub sessions: Vec<SessionMeta>,
+    pub selected: usize,
+}
+
+pub struct App {
+    pub config: Config,
+    pub theme: Theme,
+    pub messages: Vec<Message>,
+    pub session_id: String,
+    pub session_created: u64,
+    pub input: TextArea<'static>,
+    pub scroll: usize,
+    pub auto_scroll: bool,
+    pub streaming: bool,
+    pub stream_rx: Option<mpsc::Receiver<ChatEvent>>,
+    pub status: Option<String>,
+    pub resume_overlay: Option<ResumeOverlay>,
+    pub chat_width: u16,
+    pub md_cache: HashMap<usize, Vec<Line<'static>>>,
+    pub md_cache_key: HashMap<usize, (String, u16)>,
+    pub chat_lines: Vec<Line<'static>>,
+    pub stream_pulse: bool,
+    stream_frame: u8,
+    pub viewport_height: usize,
+}
+
+impl App {
+    pub fn new(config: Config) -> Self {
+        let mut app = Self {
+            config,
+            theme: Theme,
+            messages: Vec::new(),
+            session_id: String::new(),
+            session_created: 0,
+            input: new_input(&Theme),
+            scroll: 0,
+            auto_scroll: true,
+            streaming: false,
+            stream_rx: None,
+            status: None,
+            resume_overlay: None,
+            chat_width: 80,
+            md_cache: HashMap::new(),
+            md_cache_key: HashMap::new(),
+            chat_lines: Vec::new(),
+            stream_pulse: false,
+            stream_frame: 0,
+            viewport_height: 1,
+        };
+        app.start_new_session();
+        app
+    }
+
+    fn start_new_session(&mut self) {
+        self.session_id = new_session_id();
+        self.session_created = now_secs();
+        self.messages.clear();
+        self.md_cache.clear();
+        self.md_cache_key.clear();
+        self.chat_lines.clear();
+        self.scroll = 0;
+        self.auto_scroll = true;
+        self.streaming = false;
+        self.stream_rx = None;
+        self.status = None;
+        self.input = new_input(&self.theme);
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent) -> Action {
+        if self.resume_overlay.is_some() {
+            return self.handle_resume_key(key);
+        }
+
+        if is_newline_key(&key) {
+            self.input.insert_newline();
+            return Action::Continue;
+        }
+
+        match key.code {
+            KeyCode::Enter => {
+                if self.send_input() == Action::Quit {
+                    return Action::Quit;
+                }
+            }
+            KeyCode::Up if input_is_empty(&self.input) => {
+                self.auto_scroll = false;
+                self.scroll = self.scroll.saturating_sub(1);
+            }
+            KeyCode::Down if input_is_empty(&self.input) => {
+                self.scroll = (self.scroll + 1).min(self.max_scroll(self.viewport_height));
+                if self.scroll >= self.max_scroll(self.viewport_height) {
+                    self.auto_scroll = true;
+                }
+            }
+            KeyCode::PageUp if input_is_empty(&self.input) => {
+                self.auto_scroll = false;
+                self.scroll = self.scroll.saturating_sub(5);
+            }
+            KeyCode::PageDown if input_is_empty(&self.input) => {
+                self.scroll = (self.scroll + 5).min(self.max_scroll(self.viewport_height));
+                if self.scroll >= self.max_scroll(self.viewport_height) {
+                    self.auto_scroll = true;
+                }
+            }
+            _ => {
+                self.input.input_without_shortcuts(Input::from(key));
+            }
+        }
+        Action::Continue
+    }
+
+    fn handle_resume_key(&mut self, key: KeyEvent) -> Action {
+        if matches!(key.code, KeyCode::Delete | KeyCode::Backspace)
+            && key.modifiers.is_empty()
+        {
+            return self.delete_selected_session();
+        }
+
+        let Some(overlay) = self.resume_overlay.as_mut() else {
+            return Action::Continue;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.resume_overlay = None;
+            }
+            KeyCode::Up => {
+                overlay.selected = overlay.selected.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                if overlay.selected + 1 < overlay.sessions.len() {
+                    overlay.selected += 1;
+                }
+            }
+            KeyCode::Enter => {
+                let id = overlay.sessions.get(overlay.selected).map(|m| m.id.clone());
+                self.resume_overlay = None;
+                if let Some(id) = id {
+                    self.load_session(&id);
+                }
+            }
+            _ => {}
+        }
+        Action::Continue
+    }
+
+    fn delete_selected_session(&mut self) -> Action {
+        let Some(overlay) = self.resume_overlay.as_mut() else {
+            return Action::Continue;
+        };
+        let Some(session) = overlay.sessions.get(overlay.selected) else {
+            return Action::Continue;
+        };
+        let id = session.id.clone();
+        let title = session.title.clone();
+
+        match store::delete(&id) {
+            Ok(()) => {
+                overlay.sessions.retain(|s| s.id != id);
+                let deleted_active = id == self.session_id;
+                if overlay.sessions.is_empty() {
+                    self.resume_overlay = None;
+                    self.status = Some("No saved sessions".into());
+                } else {
+                    overlay.selected = overlay.selected.min(overlay.sessions.len() - 1);
+                    self.status = Some(format!("Deleted: {title}"));
+                }
+                if deleted_active {
+                    let status = self.status.clone();
+                    self.start_new_session();
+                    self.status = status;
+                }
+            }
+            Err(e) => self.status = Some(e.to_string()),
+        }
+        Action::Continue
+    }
+
+    pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.resume_overlay.is_some() {
+            return;
+        }
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.auto_scroll = false;
+                self.scroll = self.scroll.saturating_sub(3);
+            }
+            MouseEventKind::ScrollDown => {
+                self.scroll = (self.scroll + 3).min(self.max_scroll(self.viewport_height));
+                if self.scroll >= self.max_scroll(self.viewport_height) {
+                    self.auto_scroll = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn tick(&mut self) {
+        if self.streaming {
+            self.stream_frame = self.stream_frame.wrapping_add(1);
+            if self.stream_frame % 10 == 0 {
+                self.stream_pulse = !self.stream_pulse;
+            }
+        } else {
+            self.stream_frame = 0;
+            self.stream_pulse = false;
+        }
+
+        let mut done = false;
+        let mut error: Option<String> = None;
+
+        let mut tokens = Vec::new();
+        let mut thinking_tokens = Vec::new();
+        if let Some(rx) = &mut self.stream_rx {
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    ChatEvent::Token(t) => tokens.push(t),
+                    ChatEvent::ThinkingToken(t) => thinking_tokens.push(t),
+                    ChatEvent::Done => done = true,
+                    ChatEvent::Error(e) => {
+                        error = Some(e);
+                        done = true;
+                    }
+                }
+            }
+        }
+        if !tokens.is_empty() || !thinking_tokens.is_empty() {
+            if let Some(last) = self.messages.last_mut() {
+                if last.role == "assistant" {
+                    for t in thinking_tokens {
+                        last.thinking.push_str(&t);
+                    }
+                    for t in tokens {
+                        last.content.push_str(&t);
+                    }
+                    let idx = self.messages.len() - 1;
+                    self.invalidate_cache(idx);
+                }
+            }
+        }
+
+        if done {
+            self.streaming = false;
+            self.stream_rx = None;
+            if let Some(e) = error {
+                self.status = Some(e);
+            } else {
+                self.status = None;
+                let _ = self.save_session();
+            }
+        }
+    }
+
+    pub fn sync_scroll(&mut self, viewport_height: usize) {
+        if self.auto_scroll {
+            self.scroll = self.max_scroll(viewport_height);
+        }
+    }
+
+    pub fn rebuild_chat_lines(&mut self, width: u16) {
+        if width != self.chat_width {
+            self.chat_width = width;
+            self.md_cache.clear();
+            self.md_cache_key.clear();
+        }
+
+        let inner = width.saturating_sub(6);
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        let messages: Vec<(usize, String, String, String)> = self
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (i, m.role.clone(), m.thinking.clone(), m.content.clone()))
+            .collect();
+
+        for (idx, (i, role, thinking, content)) in messages.iter().enumerate() {
+            if idx > 0 {
+                lines.push(Line::from(""));
+            }
+
+            if role == "user" {
+                lines.push(Line::from(vec![
+                    Span::styled("╭─ ", self.theme.style_user_border()),
+                    Span::styled("You ", self.theme.style_user_border().bold()),
+                ]));
+                for wrapped in wrap_text(content, inner) {
+                    lines.push(Line::from(vec![
+                        Span::styled("│ ", self.theme.style_user_border()),
+                        Span::styled(wrapped.clone(), self.theme.style_user()),
+                    ]));
+                }
+                lines.push(Line::from(Span::styled(
+                    "╰",
+                    self.theme.style_user_border(),
+                )));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled("╭─ ", self.theme.style_assistant_border()),
+                    Span::styled(
+                        "Assistant ",
+                        self.theme.style_assistant_border().bold(),
+                    ),
+                ]));
+                if !thinking.is_empty() {
+                    lines.push(Line::from(vec![
+                        Span::styled("│ ", self.theme.style_assistant_border()),
+                        Span::styled("thinking ", self.theme.style_thinking().bold()),
+                    ]));
+                    for wrapped in wrap_text(thinking, inner) {
+                        lines.push(Line::from(vec![
+                            Span::styled("│ ", self.theme.style_assistant_border()),
+                            Span::styled(wrapped.clone(), self.theme.style_thinking()),
+                        ]));
+                    }
+                }
+                for rendered in self.cached_render(*i, thinking, content, width) {
+                    let mut spans = vec![Span::styled("│ ", self.theme.style_assistant_border())];
+                    spans.extend(rendered.spans);
+                    lines.push(Line::from(spans));
+                }
+                lines.push(Line::from(Span::styled(
+                    "╰",
+                    self.theme.style_assistant_border(),
+                )));
+            }
+        }
+
+        self.chat_lines = lines;
+    }
+
+    fn cached_render(
+        &mut self,
+        idx: usize,
+        thinking: &str,
+        content: &str,
+        width: u16,
+    ) -> Vec<Line<'static>> {
+        let key = (format!("{thinking}\0{content}"), width);
+        if self.md_cache_key.get(&idx) == Some(&key) {
+            if let Some(cached) = self.md_cache.get(&idx) {
+                return cached.clone();
+            }
+        }
+        let rendered = crate::markdown::render(content, width.saturating_sub(6), &self.theme);
+        self.md_cache_key.insert(idx, key);
+        self.md_cache.insert(idx, rendered.clone());
+        rendered
+    }
+
+    fn invalidate_cache(&mut self, idx: usize) {
+        self.md_cache.remove(&idx);
+        self.md_cache_key.remove(&idx);
+    }
+
+    fn send_input(&mut self) -> Action {
+        let text = self.input.lines().join("\n").trim().to_string();
+        if text.is_empty() {
+            return Action::Continue;
+        }
+
+        if text == "/quit" {
+            self.input = new_input(&self.theme);
+            return Action::Quit;
+        }
+
+        if self.streaming {
+            return Action::Continue;
+        }
+
+        self.input = new_input(&self.theme);
+
+        if text.trim() == "/resume" {
+            self.open_resume();
+            return Action::Continue;
+        }
+
+        if text.trim() == "/new" {
+            let _ = self.save_session();
+            self.start_new_session();
+            self.status = Some("New session".into());
+            return Action::Continue;
+        }
+
+        self.messages.push(Message {
+            role: "user".into(),
+            content: text,
+            thinking: String::new(),
+        });
+        self.messages.push(Message {
+            role: "assistant".into(),
+            content: String::new(),
+            thinking: String::new(),
+        });
+
+        self.streaming = true;
+        self.auto_scroll = true;
+        self.status = None;
+        self.stream_rx = Some(stream_completion(&self.config, &self.messages));
+        Action::Continue
+    }
+
+    fn open_resume(&mut self) {
+        match store::list() {
+            Ok(sessions) => {
+                if sessions.is_empty() {
+                    self.status = Some("No saved sessions".into());
+                } else {
+                    self.resume_overlay = Some(ResumeOverlay {
+                        sessions,
+                        selected: 0,
+                    });
+                }
+            }
+            Err(e) => self.status = Some(e.to_string()),
+        }
+    }
+
+    fn load_session(&mut self, id: &str) {
+        match store::load(id) {
+            Ok(session) => {
+                self.session_id = session.id;
+                self.session_created = session.created_at;
+                self.messages = session.messages;
+                self.md_cache.clear();
+                self.md_cache_key.clear();
+                self.auto_scroll = false;
+                self.scroll = 0;
+                self.status = Some(format!("Resumed: {}", session.title));
+            }
+            Err(e) => self.status = Some(e.to_string()),
+        }
+    }
+
+    pub fn save_session(&mut self) -> anyhow::Result<()> {
+        if self.messages.is_empty() {
+            return Ok(());
+        }
+        let session = Session {
+            id: self.session_id.clone(),
+            title: title_from_messages(&self.messages),
+            created_at: self.session_created,
+            updated_at: now_secs(),
+            messages: self.messages.clone(),
+        };
+        store::save(&session)?;
+        Ok(())
+    }
+
+    pub fn max_scroll(&self, viewport_height: usize) -> usize {
+        self.chat_lines
+            .len()
+            .saturating_sub(viewport_height.max(1))
+    }
+}
+
+fn input_is_empty(input: &TextArea<'static>) -> bool {
+    input.lines().join("\n").trim().is_empty()
+}
+
+fn is_newline_key(key: &KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Enter => key
+            .modifiers
+            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT),
+        KeyCode::Char('j' | 'J' | '\n' | '\r') => key.modifiers.contains(KeyModifiers::CONTROL),
+        _ => false,
+    }
+}
+
+fn new_input(theme: &Theme) -> TextArea<'static> {
+    let mut input = TextArea::default();
+    input.set_placeholder_text("Type a message… (/new · /resume · /quit)");
+    input.set_cursor_line_style(Style::default());
+    input.set_block(
+        theme
+            .block_input(" Message ")
+            .style(Style::default().bg(theme.bg())),
+    );
+    input
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+
+    fn test_config() -> Config {
+        Config {
+            base_url: "http://localhost:11434/v1".into(),
+            model: "test".into(),
+            api_key: None,
+        }
+    }
+
+    fn app_with_long_chat() -> App {
+        let mut app = App::new(test_config());
+        let mut content = String::new();
+        for i in 0..40 {
+            content.push_str(&format!("chat-line-{i:02}\n"));
+        }
+        app.messages.push(Message {
+            role: "user".into(),
+            content: "hello".into(),
+            thinking: String::new(),
+        });
+        app.messages.push(Message {
+            role: "assistant".into(),
+            content,
+            thinking: String::new(),
+        });
+        app.rebuild_chat_lines(80);
+        app.viewport_height = 10;
+        app
+    }
+
+    #[test]
+    fn page_up_disables_auto_scroll_and_moves_up() {
+        let mut app = app_with_long_chat();
+        app.auto_scroll = true;
+        app.sync_scroll(app.viewport_height);
+        let at_bottom = app.scroll;
+        assert!(at_bottom > 0);
+
+        let key = KeyEvent::new(KeyCode::PageUp, KeyModifiers::empty());
+        app.handle_key(key);
+
+        assert!(!app.auto_scroll);
+        assert!(app.scroll < at_bottom);
+        app.sync_scroll(app.viewport_height);
+        assert!(app.scroll < at_bottom);
+    }
+
+    #[test]
+    fn mouse_scroll_up_disables_auto_scroll() {
+        let mut app = app_with_long_chat();
+        app.auto_scroll = true;
+        app.sync_scroll(app.viewport_height);
+        let at_bottom = app.scroll;
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        });
+
+        assert!(!app.auto_scroll);
+        assert!(app.scroll < at_bottom);
+    }
+
+    #[test]
+    fn resumed_session_starts_at_top_without_auto_pin() {
+        let mut app = app_with_long_chat();
+        app.auto_scroll = false;
+        app.scroll = 0;
+        app.sync_scroll(app.viewport_height);
+        assert_eq!(app.scroll, 0);
+    }
+
+    #[test]
+    fn alt_enter_inserts_newline_without_sending() {
+        let mut app = App::new(test_config());
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::ALT,
+        ));
+        assert_eq!(app.input.lines(), ["x", ""]);
+        assert!(app.messages.is_empty());
+    }
+
+    #[test]
+    fn ctrl_j_inserts_newline_without_deleting_line() {
+        let mut app = App::new(test_config());
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(
+            KeyCode::Char('j'),
+            KeyModifiers::CONTROL,
+        ));
+        assert_eq!(app.input.lines(), ["ab", ""]);
+        assert!(app.messages.is_empty());
+    }
+
+    #[test]
+    fn shift_enter_inserts_newline_without_sending() {
+        let mut app = App::new(test_config());
+        for c in ['f', 'o', 'o'] {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty()));
+
+        assert_eq!(app.input.lines(), ["foo", "bar"]);
+        assert!(app.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn plain_enter_sends_message() {
+        let mut app = App::new(test_config());
+        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert_eq!(app.messages.len(), 2);
+        assert_eq!(app.messages[0].role, "user");
+        assert_eq!(app.messages[0].content, "hi");
+    }
+
+    #[test]
+    fn up_arrow_scrolls_chat_when_input_empty() {
+        let mut app = app_with_long_chat();
+        app.auto_scroll = true;
+        app.sync_scroll(app.viewport_height);
+        let at_bottom = app.scroll;
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::empty()));
+
+        assert!(!app.auto_scroll);
+        assert!(app.scroll < at_bottom);
+    }
+
+    #[test]
+    fn start_new_session_clears_messages_and_assigns_new_id() {
+        let mut app = App::new(test_config());
+        let old_id = app.session_id.clone();
+        app.messages.push(Message {
+            role: "user".into(),
+            content: "hello".into(),
+            thinking: String::new(),
+        });
+        app.status = Some("old".into());
+
+        app.start_new_session();
+
+        assert_ne!(app.session_id, old_id);
+        assert!(app.messages.is_empty());
+        assert!(app.status.is_none());
+    }
+
+    #[test]
+    fn delete_selected_session_clamps_selection() {
+        let _guard = crate::store::TEST_DIR_LOCK.lock().unwrap();
+        let tmp = std::env::temp_dir().join(format!("aitui-test-{}", new_session_id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("AITUI_TEST_SESSIONS_DIR", &tmp);
+
+        for (id, title) in [("s1", "one"), ("s2", "two"), ("s3", "three")] {
+            store::save(&Session {
+                id: id.into(),
+                title: title.into(),
+                created_at: 1,
+                updated_at: 1,
+                messages: vec![Message {
+                    role: "user".into(),
+                    content: title.into(),
+                    thinking: String::new(),
+                }],
+            })
+            .unwrap();
+        }
+
+        let mut app = App::new(test_config());
+        app.resume_overlay = Some(ResumeOverlay {
+            sessions: vec![
+                SessionMeta {
+                    id: "s1".into(),
+                    title: "one".into(),
+                    updated_at: 1,
+                },
+                SessionMeta {
+                    id: "s2".into(),
+                    title: "two".into(),
+                    updated_at: 1,
+                },
+                SessionMeta {
+                    id: "s3".into(),
+                    title: "three".into(),
+                    updated_at: 1,
+                },
+            ],
+            selected: 2,
+        });
+
+        app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::empty()));
+
+        let overlay = app.resume_overlay.as_ref().unwrap();
+        assert_eq!(overlay.sessions.len(), 2);
+        assert_eq!(overlay.selected, 1);
+        assert!(app.status.as_ref().unwrap().contains("three"));
+
+        std::env::remove_var("AITUI_TEST_SESSIONS_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+fn wrap_text(text: &str, width: u16) -> Vec<String> {
+    let w = width.max(10) as usize;
+    text.lines()
+        .flat_map(|line| {
+            if line.is_empty() {
+                vec![String::new()]
+            } else {
+                textwrap::wrap(line, w)
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect()
+            }
+        })
+        .collect()
+}
