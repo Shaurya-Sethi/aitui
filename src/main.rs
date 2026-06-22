@@ -29,7 +29,7 @@ use std::time::Duration;
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let config = Config::load(&cli)?;
+    let config = Config::load(&cli);
     let mut app = App::new(config);
 
     enable_raw_mode()?;
